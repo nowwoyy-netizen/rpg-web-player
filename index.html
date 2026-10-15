@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RPG Web Player</title>
+<style>
+:root{--bg:#f4f1e8;--card:#fff;--ink:#222;--mut:#666;--line:#d8d2c0;--btn:#2b6cb0;--bad:#d9534f}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1d22;--card:#2a2c34;--ink:#eee;--mut:#aaa;--line:#444;--btn:#4a8fe0}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,"Noto Sans Thai",sans-serif}
+.app{max-width:640px;margin:auto;padding:16px}
+h1{font-size:22px}.sm{font-size:13px;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+button,label.b{font:inherit;background:var(--btn);color:#fff;border:0;border-radius:10px;padding:10px 14px;cursor:pointer;display:inline-block}
+button.g{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button.d{background:transparent;color:var(--bad);border:1px solid var(--line)}
+input[type=file]{display:none}
+#st{min-height:20px}#st.err{color:var(--bad)}
+#player{position:fixed;inset:0;background:#000;display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;padding:8px;padding-top:calc(8px + env(safe-area-inset-top,0px));background:var(--card)}
+#frame{flex:1;border:0;width:100%;background:#000}
+[hidden]{display:none!important}
+</style></head><body>
+<div class="app" id="lib">
+<h1>🎮 RPG Web Player</h1>
+<p class="sm">เล่นเกม RPG Maker MV/MZ ในเบราว์เซอร์ ไฟล์เกมเก็บในเครื่องคุณเท่านั้น ไม่ถูกอัปโหลดไปไหน</p>
+<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap">
+<label class="b">📁 เพิ่มเกม (โฟลเดอร์)<input type="file" id="fdir" webkitdirectory multiple></label>
+<label class="b">🗜️ เพิ่มเกม (.zip)<input type="file" id="fzip" accept=".zip"></label></div>
+<div id="st" class="sm" style="margin-top:8px"></div></div>
+<div id="list"></div>
+</div>
+<div id="player" hidden><div id="bar">
+<button class="g" id="back">← กลับ</button><button class="g" id="fs">⛶ เต็มจอ</button>
+<span class="sm" id="pname" style="align-self:center"></span></div>
+<iframe id="frame" allow="autoplay; fullscreen; gamepad"></iframe></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const status = (t, err) => { $('st').textContent = t; $('st').className = 'sm' + (err ? ' err' : ''); };
+const DB = () => new Promise((res, rej) => {
+  const r = indexedDB.open('rpgweb', 1);
+  r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('files', { keyPath: 'key' }); d.createObjectStore('games', { keyPath: 'id' }); };
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+const run = (db, stores, mode, fn) => new Promise((res, rej) => {
+  const t = db.transaction(stores, mode); const out = fn(t);
+  t.oncomplete = () => res(out && out.result); t.onerror = () => rej(t.error);
+});
+
+// Add new engines here later (e.g. XP via an mkxp-web build): return the URL to load in the iframe.
+const launchers = {
+  MV: g => `game/${g.id}/index.html`,
+  MZ: g => `game/${g.id}/index.html`,
+};
+
+async function importGame(entries) {
+  const core = entries.map(e => e.path).find(p => /(^|\/)js\/(rpg_core|rmmz_core)\.js$/.test(p));
+  if (!core) {
+    const old = entries.some(e => /(^|\/)(Game\.ini|[^/]*\.rgss\d?a|[^/]*\.rxdata|[^/]*\.rvdata2?)$/i.test(e.path));
+    return status(old ? 'เกมนี้เป็น XP/VX/VX Ace ซึ่งยังไม่รองรับในเวอร์ชันนี้' : 'ไม่พบไฟล์เกม MV/MZ (ต้องมีโฟลเดอร์ js/ ที่มี rpg_core.js หรือ rmmz_core.js)', true);
+  }
+  const root = core.replace(/js\/(rpg_core|rmmz_core)\.js$/, '');
+  const engine = /rmmz/.test(core) ? 'MZ' : 'MV';
+  const files = entries.filter(e => e.path.startsWith(root));
+  if (!files.some(e => e.path === root + 'index.html')) return status('ไม่พบ index.html ในโฟลเดอร์เกม', true);
+  const parts = root.split('/').filter(Boolean); if (parts[parts.length - 1] === 'www') parts.pop();
+  const name = parts.pop() || 'เกมไม่มีชื่อ';
+  const id = crypto.randomUUID().slice(0, 8);
+  const db = await DB();
+  for (let i = 0; i < files.length; i += 200) {
+    status(`กำลังนำเข้า ${name}… ${Math.min(i + 200, files.length)}/${files.length}`);
+    const batch = files.slice(i, i + 200);
+    await run(db, 'files', 'readwrite', t => batch.forEach(e => t.objectStore('files').put({ key: id + '/' + e.path.slice(root.length), blob: e.blob })));
+  }
+  await run(db, 'games', 'readwrite', t => t.objectStore('games').put({ id, name, engine, count: files.length, added: Date.now() }));
+  status(`เพิ่ม ${name} (${engine}) เรียบร้อย`); render();
+}
+
+async function render() {
+  const db = await DB();
+  const games = (await run(db, 'games', 'readonly', t => t.objectStore('games').getAll())) || [];
+  $('list').innerHTML = games.length ? '' : '<p class="sm">ยังไม่มีเกมในคลัง</p>';
+  games.sort((a, b) => b.added - a.added).forEach(g => {
+    const d = document.createElement('div'); d.className = 'card row';
+    const info = document.createElement('div');
+    info.innerHTML = '<b></b><div class="sm"></div>'; info.firstChild.textContent = g.name;
+    info.lastChild.textContent = `${g.engine} · ${g.count} ไฟล์`;
+    const act = document.createElement('div'); act.style.cssText = 'display:flex;gap:6px';
+    const p = document.createElement('button'); p.textContent = '▶ เล่น'; p.onclick = () => play(g);
+    const x = document.createElement('button'); x.className = 'd'; x.textContent = '🗑'; x.onclick = () => del(g);
+    act.append(p, x); d.append(info, act); $('list').append(d);
+  });
+}
+async function del(g) {
+  if (!confirm(`ลบ "${g.name}" ออกจากคลัง? (เซฟเกมในเบราว์เซอร์จะยังอยู่)`)) return;
+  const db = await DB();
+  await run(db, ['files', 'games'], 'readwrite', t => {
+    t.objectStore('files').delete(IDBKeyRange.bound(g.id + '/', g.id + '0', false, true));
+    t.objectStore('games').delete(g.id);
+  });
+  render();
+}
+async function play(g) {
+  if (!('serviceWorker' in navigator)) return status('เบราว์เซอร์นี้ไม่รองรับ Service Worker (ต้องเปิดผ่าน https หรือ localhost)', true);
+  await navigator.serviceWorker.ready;
+  $('pname').textContent = g.name; $('lib').hidden = true; $('player').hidden = false;
+  $('frame').src = launchers[g.engine](g);
+}
+$('back').onclick = () => { $('frame').src = 'about:blank'; $('player').hidden = true; $('lib').hidden = false; };
+$('fs').onclick = () => ($('frame').requestFullscreen || $('player').requestFullscreen).call($('frame'));
+
+$('fdir').onchange = async e => {
+  const entries = [...e.target.files].map(f => ({ path: f.webkitRelativePath || f.name, blob: f }));
+  e.target.value = ''; if (entries.length) importGame(entries);
+};
+$('fzip').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  status('กำลังแตกไฟล์ zip…');
+  try {
+    const z = await JSZip.loadAsync(f); const entries = [];
+    for (const n of Object.keys(z.files)) if (!z.files[n].dir) entries.push({ path: n, blob: await z.files[n].async('blob') });
+    importGame(entries);
+  } catch (err) { status('เปิดไฟล์ zip ไม่ได้: ' + err.message, true); }
+};
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => status('ลงทะเบียน Service Worker ไม่ได้: ' + err.message, true));
+else status('ต้องเปิดผ่าน https หรือ localhost เพื่อให้ใช้งานได้', true);
+render();
+</script></body></html>
